@@ -147,17 +147,17 @@ use std::{cell::UnsafeCell, sync::Mutex, thread, time::Duration};
 // ...
 
 struct ServerState {
-    pub request_count: UnsafeCell<u8>,  // ❌ No synchronization
+    pub request_count: UnsafeCell<u8>,  // No synchronization
 }
 
-unsafe impl Sync for ServerState {}     // ❌ Manually bypasses safety
+unsafe impl Sync for ServerState {}     // Manually bypasses safety
 
 #[get("/announcements")]
 async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Responder> {
     let page = get_frontpage("https://scele.cs.ui.ac.id").unwrap();
     let announcements = parse_frontpage(page);
 
-    // ❌ Race condition: no lock, threads interleave freely
+    // Race condition: no lock, threads interleave freely
     unsafe {
         let request_count_ptr = data.request_count.get();
         let val = *request_count_ptr;
@@ -172,7 +172,7 @@ async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Resp
 
 async fn main() -> std::io::Result<()> {
     let state = web::Data::new(ServerState {
-        request_count: UnsafeCell::new(0),  // ❌ Starts with unsafe cell
+        request_count: UnsafeCell::new(0),  //Starts with unsafe cell
     });
     // ...
 }
@@ -188,21 +188,21 @@ async fn main() -> std::io::Result<()> {
 ### AFTER FIX (`main.rs`)
 
 ```rust
-use std::{sync::Mutex, thread, time::Duration};  // ✅ Removed UnsafeCell
+use std::{sync::Mutex, thread, time::Duration};  // Removed UnsafeCell
 // ...
 
 struct ServerState {
-    pub request_count: Mutex<u8>,  // ✅ Mutex provides mutual exclusion
+    pub request_count: Mutex<u8>,  // Mutex provides mutual exclusion
 }
 
-// ✅ No unsafe impl Sync needed — Mutex<T: Send> is already Sync
+// No unsafe impl Sync needed — Mutex<T: Send> is already Sync
 
 #[get("/announcements")]
 async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Responder> {
     let page = get_frontpage("https://scele.cs.ui.ac.id").unwrap();
     let announcements = parse_frontpage(page);
 
-    // ✅ Only one thread at a time can enter this block
+    // Only one thread at a time can enter this block
     {
         let mut count = data.request_count.lock().unwrap();
         let val = *count;
@@ -210,14 +210,14 @@ async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Resp
         thread::sleep(Duration::from_millis(delay_ms));
         *count = val + 1;
         println!("Request count: {}", *count);
-    } // ✅ Lock released automatically (RAII)
+    } // Lock released automatically (RAII)
 
     Ok(web::Json(announcements))
 }
 
 async fn main() -> std::io::Result<()> {
     let state = web::Data::new(ServerState {
-        request_count: Mutex::new(0),  // ✅ Protected by Mutex
+        request_count: Mutex::new(0),  // Protected by Mutex
     });
     // ...
 }
@@ -248,7 +248,7 @@ struct CachedResponse {
 
 struct ServerState {
     pub request_count: Mutex<u8>,
-    pub cache: Mutex<Option<CachedResponse>>,  // ✅ New shared field
+    pub cache: Mutex<Option<CachedResponse>>,  // New shared field
 }
 ```
 
@@ -261,7 +261,7 @@ Both fields are wrapped in `Mutex`, so:
 ```rust
 #[get("/announcements")]
 async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Responder> {
-    // ✅ Check cache first
+    // Check cache first
     let announcements = {
         let mut cache = data.cache.lock().unwrap();
 
@@ -278,7 +278,7 @@ async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Resp
             });
             fetched
         }
-    }; // ✅ Cache lock released
+    }; // Cache lock released
 
     // Increment request count (separate lock, no deadlock risk)
     {
@@ -334,9 +334,9 @@ if let Some(ref cached) = *cache {
 | Aspect | Before Fix | After Fix | With Cache |
 |--------|-----------|-----------|------------|
 | `request_count` storage | `UnsafeCell<u8>` | `Mutex<u8>` | `Mutex<u8>` |
-| Thread safety | ❌ Manual + unsafe | ✅ Mutex | ✅ Mutex |
-| Race condition | ❌ Yes (interleaving) | ✅ No | ✅ No |
-| Lost update | ❌ Yes | ✅ No | ✅ No |
-| Deadlock risk | ❌ N/A (no sync) | ✅ None (1 lock) | ✅ None (2 sequential locks) |
+| Thread safety |  Manual + unsafe | Mutex | Mutex |
+| Race condition | Yes (interleaving) | No | No |
+| Lost update | Yes | No | No |
+| Deadlock risk | N/A (no sync) | None (1 lock) | None (2 sequential locks) |
 | Network calls to SCELE | Every request | Every request | Only on cache miss |
 | New concurrency issues | — | None | Cache stampede (minor, by design) |
