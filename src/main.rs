@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, sync::Mutex, thread, time::Duration};
+use std::{sync::Mutex, thread, time::Duration};
 
 use actix_web::{Responder, Result, get, web};
 use chrono::{DateTime, Utc};
@@ -15,11 +15,15 @@ struct AnnouncementResponse {
     pub date_time: DateTime<Utc>,
 }
 
-struct ServerState {
-    pub request_count: UnsafeCell<u8>,
+struct CachedResponse {
+    pub announcements: Vec<AnnouncementResponse>,
+    pub cached_at: chrono::DateTime<Utc>,
 }
 
-unsafe impl Sync for ServerState {}
+struct ServerState {
+    pub request_count: Mutex<u8>,
+    pub cache: Mutex<Option<CachedResponse>>,
+}
 
 fn parse_frontpage(page: Html) -> Vec<AnnouncementResponse> {
     let selector = Selector::parse("article").unwrap();
@@ -54,19 +58,34 @@ fn parse_frontpage(page: Html) -> Vec<AnnouncementResponse> {
 
 #[get("/announcements")]
 async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Responder> {
-    let page = get_frontpage("https://scele.cs.ui.ac.id").unwrap();
-    let announcements = parse_frontpage(page);
+    // --- Cache: only fetch from SCELE on a cache miss ---
+    let announcements = {
+        let mut cache = data.cache.lock().unwrap();
 
-    // Deliberately unsafe, because Rust is too safe for our demo :))
-    unsafe {
-        let request_count_ptr = data.request_count.get();
-        let val = *request_count_ptr;
-        let delay_ms = rand::thread_rng().gen_range(0..1000_u64); // This is to simulate interleaving execution in the thread
+        if let Some(ref cached) = *cache {
+            // Cache hit: return stored announcements without hitting SCELE
+            cached.announcements.clone()
+        } else {
+            // Cache miss: fetch, parse, and store in cache
+            let page = get_frontpage("https://scele.cs.ui.ac.id").unwrap();
+            let fetched = parse_frontpage(page);
+            *cache = Some(CachedResponse {
+                announcements: fetched.clone(),
+                cached_at: Utc::now(),
+            });
+            fetched
+        }
+    }; // cache lock released here
+
+    // --- Fixed critical section: Mutex guarantees mutual exclusion ---
+    {
+        let mut count = data.request_count.lock().unwrap();
+        let val = *count;
+        let delay_ms = rand::thread_rng().gen_range(0..1000_u64); // simulates interleaving — now safe
         thread::sleep(Duration::from_millis(delay_ms));
-        *request_count_ptr = val + 1;
-    }
-    
-    println!("Request count: {}", unsafe { *data.request_count.get() });
+        *count = val + 1;
+        println!("Request count: {}", *count);
+    } // request_count lock released here
 
     Ok(web::Json(announcements))
 }
@@ -74,7 +93,8 @@ async fn get_all_announcements(data: web::Data<ServerState>) -> Result<impl Resp
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let state = web::Data::new(ServerState {
-        request_count: UnsafeCell::new(0),
+        request_count: Mutex::new(0),
+        cache: Mutex::new(None),
     });
 
     use actix_web::{App, HttpServer};
